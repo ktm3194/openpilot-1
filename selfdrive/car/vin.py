@@ -1,19 +1,10 @@
 #!/usr/bin/env python3
 import re
-import struct
-import traceback
 
 import cereal.messaging as messaging
-import panda.python.uds as uds
-from panda.python.uds import FUNCTIONAL_ADDRS
 from selfdrive.car.isotp_parallel_query import IsoTpParallelQuery
+from selfdrive.car.fw_query_definitions import StdQueries
 from system.swaglog import cloudlog
-
-OBD_VIN_REQUEST = b'\x09\x02'
-OBD_VIN_RESPONSE = b'\x49\x02\x01'
-
-UDS_VIN_REQUEST = bytes([uds.SERVICE_TYPE.READ_DATA_BY_IDENTIFIER]) + struct.pack("!H", uds.DATA_IDENTIFIER_TYPE.VIN)
-UDS_VIN_RESPONSE = bytes([uds.SERVICE_TYPE.READ_DATA_BY_IDENTIFIER + 0x40]) + struct.pack("!H", uds.DATA_IDENTIFIER_TYPE.VIN)
 
 VIN_UNKNOWN = "0" * 17
 VIN_RE = "[A-HJ-NPR-Z0-9]{17}"
@@ -24,10 +15,11 @@ def is_valid_vin(vin: str):
 
 
 def get_vin(logcan, sendcan, bus, timeout=0.1, retry=5, debug=False):
+  addrs = [0x7e0, 0x7e2, 0x18da10f1, 0x18da0ef1]  # engine, VMCU, 29-bit engine, PGM-FI
   for i in range(retry):
-    for request, response in ((UDS_VIN_REQUEST, UDS_VIN_RESPONSE), (OBD_VIN_REQUEST, OBD_VIN_RESPONSE)):
+    for request, response in ((StdQueries.UDS_VIN_REQUEST, StdQueries.UDS_VIN_RESPONSE), (StdQueries.OBD_VIN_REQUEST, StdQueries.OBD_VIN_RESPONSE)):
       try:
-        query = IsoTpParallelQuery(sendcan, logcan, bus, FUNCTIONAL_ADDRS, [request, ], [response, ], functional_addr=True, debug=debug)
+        query = IsoTpParallelQuery(sendcan, logcan, bus, addrs, [request, ], [response, ], debug=debug)
         for (addr, rx_addr), vin in query.get_data(timeout).items():
 
           # Honda Bosch response starts with a length, trim to correct length
@@ -35,17 +27,27 @@ def get_vin(logcan, sendcan, bus, timeout=0.1, retry=5, debug=False):
             vin = vin[1:18]
 
           return addr[0], rx_addr, vin.decode()
-        print(f"vin query retry ({i+1}) ...")
+        cloudlog.error(f"vin query retry ({i+1}) ...")
       except Exception:
-        cloudlog.warning(f"VIN query exception: {traceback.format_exc()}")
+        cloudlog.exception("VIN query exception")
 
   return 0, 0, VIN_UNKNOWN
 
 
 if __name__ == "__main__":
+  import argparse
   import time
+
+  parser = argparse.ArgumentParser(description='Get VIN of the car')
+  parser.add_argument('--debug', action='store_true')
+  parser.add_argument('--bus', type=int, default=1)
+  parser.add_argument('--timeout', type=float, default=0.1)
+  parser.add_argument('--retry', type=int, default=5)
+  args = parser.parse_args()
+
   sendcan = messaging.pub_sock('sendcan')
   logcan = messaging.sub_sock('can')
   time.sleep(1)
-  addr, vin_rx_addr, vin = get_vin(logcan, sendcan, 1, debug=False)
+
+  addr, vin_rx_addr, vin = get_vin(logcan, sendcan, args.bus, args.timeout, args.retry, debug=args.debug)
   print(f'TX: {hex(addr)}, RX: {hex(vin_rx_addr)}, VIN: {vin}')
